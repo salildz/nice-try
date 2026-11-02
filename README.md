@@ -38,6 +38,18 @@ You can also run the script directly (a console window will be visible):
 powershell -NoProfile -ExecutionPolicy Bypass -File .\fake-desktop.ps1
 ```
 
+### Launch it with a keyboard shortcut
+
+For a quick getaway, give it a hotkey so you can trigger it on your way out of your chair:
+
+1. Right-click **`launch.vbs`** and pick **Send to → Desktop (create shortcut)**.
+2. Right-click the new shortcut on your desktop and open **Properties**.
+3. On the **Shortcut** tab, click the **Shortcut key** box and press the combo you want, e.g. `Ctrl + Alt + F`.
+4. Click **OK**.
+
+Now pressing that combo starts the fake desktop from anywhere. Windows only picks up shortcut keys for shortcuts
+on the Desktop or in the Start Menu, so leave the shortcut there (moving it into the Start Menu folder works too).
+
 ### Secret exit
 
 Press **`Ctrl + Alt + Q`** to close the fake desktop cleanly, with no gotcha and no lock.
