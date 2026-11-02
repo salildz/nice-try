@@ -45,7 +45,7 @@ function Test-ExitCombo {
 
 function Start-Camera {
     # Grabs webcam frames in a background runspace so the GIF keeps animating while the camera starts up.
-    # The newest JPEG frame is handed over through a synchronized hashtable; nothing is saved to disk.
+    # The newest frame (raw BGRA pixels) is handed over through a synchronized hashtable; nothing is saved to disk.
     $script:cam = [hashtable]::Synchronized(@{ Frame = $null; Stop = $false; Error = $null })
     $script:camBoxes = @()
     $rs = [runspacefactory]::CreateRunspace()
@@ -59,10 +59,12 @@ function Start-Camera {
             Add-Type -AssemblyName System.Runtime.WindowsRuntime
             $null = [Windows.Media.Capture.MediaCapture, Windows.Media.Capture, ContentType = WindowsRuntime]
             $null = [Windows.Media.Capture.MediaCaptureInitializationSettings, Windows.Media.Capture, ContentType = WindowsRuntime]
-            $null = [Windows.Media.Capture.LowLagPhotoCapture, Windows.Media.Capture, ContentType = WindowsRuntime]
-            $null = [Windows.Media.Capture.CapturedPhoto, Windows.Media.Capture, ContentType = WindowsRuntime]
-            $null = [Windows.Media.MediaProperties.ImageEncodingProperties, Windows.Media.MediaProperties, ContentType = WindowsRuntime]
+            $null = [Windows.Media.Capture.Frames.MediaFrameReader, Windows.Media.Capture.Frames, ContentType = WindowsRuntime]
+            $null = [Windows.Media.Capture.Frames.MediaFrameReaderStartStatus, Windows.Media.Capture.Frames, ContentType = WindowsRuntime]
+            $null = [Windows.Media.MediaProperties.MediaEncodingSubtypes, Windows.Media.MediaProperties, ContentType = WindowsRuntime]
             $null = [Windows.Devices.Enumeration.DeviceInformation, Windows.Devices.Enumeration, ContentType = WindowsRuntime]
+            $null = [Windows.Storage.Streams.DataReader, Windows.Storage.Streams, ContentType = WindowsRuntime]
+            $null = [Windows.Storage.Streams.Buffer, Windows.Storage.Streams, ContentType = WindowsRuntime]
 
             # WinRT async calls -> .NET tasks we can wait on
             $ext = [System.WindowsRuntimeSystemExtensions].GetMethods()
@@ -77,22 +79,40 @@ function Start-Camera {
             if (-not $device) { $device = $devices | Where-Object { $_.IsEnabled } | Select-Object -First 1 }
             if (-not $device) { throw 'No camera found' }
 
+            # Shared mode: only reads the video stream, so it also works while another app (e.g. Teams) uses the camera
             $settings = New-Object Windows.Media.Capture.MediaCaptureInitializationSettings
             $settings.VideoDeviceId = $device.Id
-            $settings.StreamingCaptureMode = [Windows.Media.Capture.StreamingCaptureMode]::Video
+            $settings.StreamingCaptureMode = 'Video'
+            $settings.SharingMode = 'SharedReadOnly'
+            $settings.MemoryPreference = 'Cpu'
             $mc = New-Object Windows.Media.Capture.MediaCapture
             Wait-Action ($mc.InitializeAsync($settings))
-            $lowLag = Wait-Op ($mc.PrepareLowLagPhotoCaptureAsync([Windows.Media.MediaProperties.ImageEncodingProperties]::CreateJpeg())) ([Windows.Media.Capture.LowLagPhotoCapture])
+
+            # FrameSources has no usable .Values from PowerShell, but enumerating it yields key/value pairs
+            $sources = @(foreach ($kv in $mc.FrameSources) { if ($kv.Value.Info.SourceKind -eq 'Color') { $kv.Value } })
+            $source = $sources | Where-Object { $_.Info.MediaStreamType -eq 'VideoPreview' } | Select-Object -First 1
+            if (-not $source) { $source = $sources | Select-Object -First 1 }
+            if (-not $source) { throw 'No color video stream' }
+            $reader = Wait-Op ($mc.CreateFrameReaderAsync($source, [Windows.Media.MediaProperties.MediaEncodingSubtypes]::Bgra8)) ([Windows.Media.Capture.Frames.MediaFrameReader])
+            $status = Wait-Op ($reader.StartAsync()) ([Windows.Media.Capture.Frames.MediaFrameReaderStartStatus])
+            if ("$status" -ne 'Success') { throw "Camera didn't start: $status" }
 
             while (-not $cam.Stop) {
-                $photo = Wait-Op ($lowLag.CaptureAsync()) ([Windows.Media.Capture.CapturedPhoto])
-                $s = [System.IO.WindowsRuntimeStreamExtensions]::AsStreamForRead($photo.Frame)
-                $ms = New-Object System.IO.MemoryStream
-                $s.CopyTo($ms)
-                $cam.Frame = $ms.ToArray()
-                $s.Dispose(); $ms.Dispose()
+                $fr = $reader.TryAcquireLatestFrame()
+                if (-not $fr) { Start-Sleep -Milliseconds 15; continue }
+                $sb = $fr.VideoMediaFrame.SoftwareBitmap
+                if ($sb) {
+                    $buf = New-Object Windows.Storage.Streams.Buffer ([uint32]($sb.PixelWidth * $sb.PixelHeight * 4))
+                    $sb.CopyToBuffer($buf)
+                    $pixels = New-Object byte[] $buf.Length
+                    [Windows.Storage.Streams.DataReader]::FromBuffer($buf).ReadBytes($pixels)
+                    $cam.Frame = @{ Width = $sb.PixelWidth; Height = $sb.PixelHeight; Pixels = $pixels }
+                    $sb.Dispose()
+                }
+                $fr.Dispose()
             }
-            Wait-Action ($lowLag.FinishAsync())
+            Wait-Action ($reader.StopAsync())
+            $reader.Dispose()
             $mc.Dispose()
         } catch {
             $cam.Error = "$_"
@@ -102,7 +122,7 @@ function Start-Camera {
 
     # Put the newest frame on every screen (mirrored, like a selfie camera)
     $script:camTimer = New-Object System.Windows.Forms.Timer
-    $script:camTimer.Interval = 50
+    $script:camTimer.Interval = 33   # ~30 fps
     $script:camTimer.Add_Tick({
         if ($script:cam.Error) {
             # No usable camera (missing, busy or blocked in privacy settings): give its space back to the GIF
@@ -117,10 +137,11 @@ function Start-Camera {
         $frame = $script:cam.Frame
         if (-not $frame) { return }
         $script:cam.Frame = $null
-        $ms = New-Object System.IO.MemoryStream (,$frame)
-        $img = [System.Drawing.Image]::FromStream($ms)
-        $bmp = New-Object System.Drawing.Bitmap $img
-        $img.Dispose(); $ms.Dispose()
+        # 32bppRgb ignores the alpha byte (webcams often leave it at 0, which would make the image invisible)
+        $bmp = New-Object System.Drawing.Bitmap $frame.Width, $frame.Height, ([System.Drawing.Imaging.PixelFormat]::Format32bppRgb)
+        $data = $bmp.LockBits((New-Object System.Drawing.Rectangle 0, 0, $frame.Width, $frame.Height), 'WriteOnly', $bmp.PixelFormat)
+        [System.Runtime.InteropServices.Marshal]::Copy($frame.Pixels, 0, $data.Scan0, $frame.Pixels.Length)
+        $bmp.UnlockBits($data)
         $bmp.RotateFlip([System.Drawing.RotateFlipType]::RotateNoneFlipX)
         foreach ($cb in $script:camBoxes) { $cb.Image = $bmp }
         if ($script:camFrame) { $script:camFrame.Dispose() }

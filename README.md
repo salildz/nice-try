@@ -71,11 +71,12 @@ Mouse movement has to exceed 8 pixels before it counts, so a slightly bumped des
 
 ### Camera mode
 
-With `$CAMERA = $true`, whoever gets caught also sees their own face, live and mirrored, right next to the laughing GIF.
+With `$CAMERA = $true`, whoever gets caught also sees their own face as a live, mirrored video (~30 fps) right next to the laughing GIF.
 
 - The camera only turns on once someone gets caught, so the webcam light doesn't give the prank away while you're gone.
-- It takes a second or two for the camera to wake up. Bump `$HOLD_MS` up a bit if you want them to enjoy it longer.
+- The feed shows up within about a second. Bump `$HOLD_MS` up if you want them to enjoy it longer.
 - The built-in front camera is preferred over virtual cameras (like a phone connected through Phone Link).
+- The camera is opened in shared mode, so it should keep working even while another app is using it.
 - Frames are only shown on screen, nothing is recorded or saved.
 - Desktop apps need camera access: **Settings → Privacy & security → Camera → Let desktop apps access your camera**.
 - If there's no camera, it's busy, or access is blocked, the GIF simply takes the full width.
