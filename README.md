@@ -10,6 +10,12 @@ Run it, walk away. Your screen looks exactly like your normal desktop, but it's 
 The moment someone moves the mouse, clicks, or presses a key, every monitor switches to a big **"Nice try :D"**
 with a laughing GIF, and a few seconds later the PC really locks itself.
 
+## Demo
+
+<p align="center">
+  <img src="demo.gif" alt="Moving the mouse on the fake desktop shows Nice try with the laughing GIF and the live webcam feed on every monitor, then the PC locks">
+</p>
+
 ## How it works
 
 1. Takes a screenshot of every connected monitor.
