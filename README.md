@@ -52,8 +52,8 @@ on the Desktop or in the Start Menu, so leave the shortcut there (moving it into
 
 ### Secret exit
 
-Press **`Ctrl + Alt + Q`** to close the fake desktop cleanly, with no gotcha and no lock.
-This works at any time, including during the grace period.
+Press **`Ctrl + Alt + Q`** to close the fake desktop without the gotcha screen. The PC still goes straight to the
+lock screen, just in case. This works at any time, including during the grace period and after someone got caught.
 
 ## Configuration
 

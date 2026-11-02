@@ -12,7 +12,7 @@ using System.Runtime.InteropServices;
 public static class K { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey); }
 "@
 
-# Secret exit combo: Ctrl + Alt + Q  (clean exit, no gotcha and no lock)
+# Secret exit combo: Ctrl + Alt + Q  (skips the gotcha screen, but still locks the PC just in case)
 # Want a different key? Replace 0x51 (= Q) in Test-ExitCombo with another VK code,
 # and Keys::Q in the KeyDown handler below with the matching key.
 
@@ -26,9 +26,10 @@ $HOLD_MS = 6000    # how many ms the gotcha screen stays up before locking. 1000
 $IMAGE = Join-Path $PSScriptRoot "laughinggif2.gif"   # png/jpg/gif in the same folder; GIFs animate. If missing, only the text is shown
 
 function Exit-Clean {
-    # No gotcha, no lock: close the windows and return to the real desktop
+    # No gotcha: close the windows and go straight to the lock screen
     if ($script:timer) { $script:timer.Stop() }
     if ($script:lockTimer) { $script:lockTimer.Stop() }
+    rundll32.exe user32.dll, LockWorkStation
     [System.Windows.Forms.Application]::Exit()
 }
 
