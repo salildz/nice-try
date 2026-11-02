@@ -2,7 +2,7 @@
 # Takes a screenshot of every monitor and shows it full screen as a "frozen desktop".
 # Nothing triggers during the first $GRACE seconds (so you have time to walk away).
 # After that, if the mouse moves, a mouse button is clicked or a key is pressed:
-# shows "Nice try :D" (plus the GIF, if present) and then actually locks the PC.
+# shows "Nice try :D" (plus the GIF and, optionally, the webcam feed) and then actually locks the PC.
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -20,10 +20,12 @@ $script:triggered  = $false
 $script:forms      = @()
 $script:timer      = $null
 $script:lockTimer  = $null
+$script:cam        = $null
 $script:startTime  = Get-Date
 $GRACE = 2         # seconds: nothing triggers during this period
 $HOLD_MS = 6000    # how many ms the gotcha screen stays up before locking. 1000 = 1 s
 $IMAGE = Join-Path $PSScriptRoot "laughinggif2.gif"   # png/jpg/gif in the same folder; GIFs animate. If missing, only the text is shown
+$CAMERA = $false   # $true: also show the webcam feed next to the GIF when someone gets caught (Windows PowerShell 5.1 only)
 
 function Exit-Clean {
     # No gotcha: close the windows and go straight to the lock screen
@@ -41,11 +43,106 @@ function Test-ExitCombo {
     return ($ctrl -and $alt -and $q)
 }
 
+function Start-Camera {
+    # Grabs webcam frames in a background runspace so the GIF keeps animating while the camera starts up.
+    # The newest JPEG frame is handed over through a synchronized hashtable; nothing is saved to disk.
+    $script:cam = [hashtable]::Synchronized(@{ Frame = $null; Stop = $false; Error = $null })
+    $script:camBoxes = @()
+    $rs = [runspacefactory]::CreateRunspace()
+    $rs.ApartmentState = [System.Threading.ApartmentState]::MTA
+    $rs.Open()
+    $rs.SessionStateProxy.SetVariable('cam', $script:cam)
+    $script:camPs = [powershell]::Create()
+    $script:camPs.Runspace = $rs
+    [void]$script:camPs.AddScript({
+        try {
+            Add-Type -AssemblyName System.Runtime.WindowsRuntime
+            $null = [Windows.Media.Capture.MediaCapture, Windows.Media.Capture, ContentType = WindowsRuntime]
+            $null = [Windows.Media.Capture.MediaCaptureInitializationSettings, Windows.Media.Capture, ContentType = WindowsRuntime]
+            $null = [Windows.Media.Capture.LowLagPhotoCapture, Windows.Media.Capture, ContentType = WindowsRuntime]
+            $null = [Windows.Media.Capture.CapturedPhoto, Windows.Media.Capture, ContentType = WindowsRuntime]
+            $null = [Windows.Media.MediaProperties.ImageEncodingProperties, Windows.Media.MediaProperties, ContentType = WindowsRuntime]
+            $null = [Windows.Devices.Enumeration.DeviceInformation, Windows.Devices.Enumeration, ContentType = WindowsRuntime]
+
+            # WinRT async calls -> .NET tasks we can wait on
+            $ext = [System.WindowsRuntimeSystemExtensions].GetMethods()
+            $asTaskOp = $ext | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' } | Select-Object -First 1
+            $asTaskAction = $ext | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncAction' } | Select-Object -First 1
+            function Wait-Op($op, [type]$type) { $t = $asTaskOp.MakeGenericMethod($type).Invoke($null, @($op)); $t.Wait(-1) | Out-Null; $t.Result }
+            function Wait-Action($action) { $t = $asTaskAction.Invoke($null, @($action)); $t.Wait(-1) | Out-Null }
+
+            # Prefer the built-in front camera over virtual ones (e.g. a phone connected through Phone Link)
+            $devices = Wait-Op ([Windows.Devices.Enumeration.DeviceInformation]::FindAllAsync([Windows.Devices.Enumeration.DeviceClass]::VideoCapture)) ([Windows.Devices.Enumeration.DeviceInformationCollection])
+            $device = $devices | Where-Object { $_.IsEnabled -and $_.EnclosureLocation -and $_.EnclosureLocation.Panel -eq 'Front' } | Select-Object -First 1
+            if (-not $device) { $device = $devices | Where-Object { $_.IsEnabled } | Select-Object -First 1 }
+            if (-not $device) { throw 'No camera found' }
+
+            $settings = New-Object Windows.Media.Capture.MediaCaptureInitializationSettings
+            $settings.VideoDeviceId = $device.Id
+            $settings.StreamingCaptureMode = [Windows.Media.Capture.StreamingCaptureMode]::Video
+            $mc = New-Object Windows.Media.Capture.MediaCapture
+            Wait-Action ($mc.InitializeAsync($settings))
+            $lowLag = Wait-Op ($mc.PrepareLowLagPhotoCaptureAsync([Windows.Media.MediaProperties.ImageEncodingProperties]::CreateJpeg())) ([Windows.Media.Capture.LowLagPhotoCapture])
+
+            while (-not $cam.Stop) {
+                $photo = Wait-Op ($lowLag.CaptureAsync()) ([Windows.Media.Capture.CapturedPhoto])
+                $s = [System.IO.WindowsRuntimeStreamExtensions]::AsStreamForRead($photo.Frame)
+                $ms = New-Object System.IO.MemoryStream
+                $s.CopyTo($ms)
+                $cam.Frame = $ms.ToArray()
+                $s.Dispose(); $ms.Dispose()
+            }
+            Wait-Action ($lowLag.FinishAsync())
+            $mc.Dispose()
+        } catch {
+            $cam.Error = "$_"
+        }
+    })
+    $script:camHandle = $script:camPs.BeginInvoke()
+
+    # Put the newest frame on every screen (mirrored, like a selfie camera)
+    $script:camTimer = New-Object System.Windows.Forms.Timer
+    $script:camTimer.Interval = 50
+    $script:camTimer.Add_Tick({
+        if ($script:cam.Error) {
+            # No usable camera (missing, busy or blocked in privacy settings): give its space back to the GIF
+            $script:camTimer.Stop()
+            foreach ($cb in $script:camBoxes) {
+                $tlp = $cb.Parent
+                if ($tlp.ColumnCount -gt 1) { $tlp.ColumnStyles[$tlp.GetColumn($cb)].Width = 0 } else { $tlp.RowStyles[1].Height = 0 }
+                $cb.Visible = $false
+            }
+            return
+        }
+        $frame = $script:cam.Frame
+        if (-not $frame) { return }
+        $script:cam.Frame = $null
+        $ms = New-Object System.IO.MemoryStream (,$frame)
+        $img = [System.Drawing.Image]::FromStream($ms)
+        $bmp = New-Object System.Drawing.Bitmap $img
+        $img.Dispose(); $ms.Dispose()
+        $bmp.RotateFlip([System.Drawing.RotateFlipType]::RotateNoneFlipX)
+        foreach ($cb in $script:camBoxes) { $cb.Image = $bmp }
+        if ($script:camFrame) { $script:camFrame.Dispose() }
+        $script:camFrame = $bmp
+    })
+    $script:camTimer.Start()
+}
+
+function Stop-Camera {
+    # Let the capture loop finish so the webcam (and its LED) is released right away
+    if (-not $script:cam) { return }
+    $script:camTimer.Stop()
+    $script:cam.Stop = $true
+    [void]$script:camHandle.AsyncWaitHandle.WaitOne(3000)
+}
+
 function Invoke-Gotcha {
     if ($script:triggered) { return }
     if (((Get-Date) - $script:startTime).TotalSeconds -lt $GRACE) { return }
     $script:triggered = $true
     if ($script:timer) { $script:timer.Stop() }
+    if ($CAMERA) { Start-Camera }   # start first: the camera needs a second or two to wake up
 
     $dark = [System.Drawing.Color]::FromArgb(15, 15, 22)
     $hasImage = (Test-Path $IMAGE)
@@ -57,23 +154,16 @@ function Invoke-Gotcha {
         $f.Controls.Clear()
         $f.BackColor = $dark
 
+        $lbl = New-Object System.Windows.Forms.Label
+        $lbl.Dock = 'Fill'
+        $lbl.TextAlign = 'MiddleCenter'
+        $lbl.ForeColor = [System.Drawing.Color]::White
+        $lbl.Font = New-Object System.Drawing.Font('Segoe UI Emoji', 40, [System.Drawing.FontStyle]::Bold)
+        $lbl.Text = "Nice try" + [Environment]::NewLine + ":D"
+
+        # Bottom half: the image/GIF and/or the camera feed, side by side
+        $cells = @()
         if ($hasImage) {
-            # Top half text, bottom half image/GIF
-            $tlp = New-Object System.Windows.Forms.TableLayoutPanel
-            $tlp.Dock = 'Fill'
-            $tlp.BackColor = $dark
-            $tlp.RowCount = 2
-            $tlp.ColumnCount = 1
-            $tlp.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 50))) | Out-Null
-            $tlp.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 50))) | Out-Null
-
-            $lbl = New-Object System.Windows.Forms.Label
-            $lbl.Dock = 'Fill'
-            $lbl.TextAlign = 'MiddleCenter'
-            $lbl.ForeColor = [System.Drawing.Color]::White
-            $lbl.Font = New-Object System.Drawing.Font('Segoe UI Emoji', 40, [System.Drawing.FontStyle]::Bold)
-            $lbl.Text = "Nice try" + [Environment]::NewLine + ":D"
-
             $ms = New-Object System.IO.MemoryStream (,$bytes)   # separate copy per screen -> the GIF animates on each one
             $script:streams += $ms
             $pb = New-Object System.Windows.Forms.PictureBox
@@ -81,17 +171,35 @@ function Invoke-Gotcha {
             $pb.SizeMode = 'Zoom'
             $pb.BackColor = $dark
             $pb.Image = [System.Drawing.Image]::FromStream($ms)
+            $cells += $pb
+        }
+        if ($script:cam) {
+            $cb = New-Object System.Windows.Forms.PictureBox
+            $cb.Dock = 'Fill'
+            $cb.SizeMode = 'Zoom'
+            $cb.BackColor = $dark
+            $script:camBoxes += $cb
+            $cells += $cb
+        }
+
+        if ($cells.Count -gt 0) {
+            # Top half text, bottom half image/GIF (and camera)
+            $tlp = New-Object System.Windows.Forms.TableLayoutPanel
+            $tlp.Dock = 'Fill'
+            $tlp.BackColor = $dark
+            $tlp.RowCount = 2
+            $tlp.ColumnCount = $cells.Count
+            $tlp.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 50))) | Out-Null
+            $tlp.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 50))) | Out-Null
 
             $tlp.Controls.Add($lbl, 0, 0)
-            $tlp.Controls.Add($pb,  0, 1)
+            $tlp.SetColumnSpan($lbl, $cells.Count)
+            for ($i = 0; $i -lt $cells.Count; $i++) {
+                $tlp.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 50))) | Out-Null
+                $tlp.Controls.Add($cells[$i], $i, 1)
+            }
             $f.Controls.Add($tlp)
         } else {
-            $lbl = New-Object System.Windows.Forms.Label
-            $lbl.Dock = 'Fill'
-            $lbl.TextAlign = 'MiddleCenter'
-            $lbl.ForeColor = [System.Drawing.Color]::White
-            $lbl.Font = New-Object System.Drawing.Font('Segoe UI Emoji', 40, [System.Drawing.FontStyle]::Bold)
-            $lbl.Text = "Nice try" + [Environment]::NewLine + ":D"
             $f.Controls.Add($lbl)
         }
         $f.Refresh()
@@ -175,3 +283,4 @@ $script:timer.Add_Tick({
 $script:timer.Start()
 
 [System.Windows.Forms.Application]::Run()
+Stop-Camera

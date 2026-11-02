@@ -15,10 +15,11 @@ with a laughing GIF, and a few seconds later the PC really locks itself.
 1. Takes a screenshot of every connected monitor.
 2. Covers each monitor with a borderless, always-on-top window showing that screenshot, so it looks like the real desktop.
 3. Waits for a short grace period (so you can step away without triggering it yourself).
-4. After that, any mouse movement, mouse click or key press triggers the gotcha screen.
+4. After that, any mouse movement, mouse click or key press triggers the gotcha screen
+   (optionally with a live webcam feed next to the GIF, see [Camera mode](#camera-mode)).
 5. The gotcha screen stays up for a few seconds, then the workstation is locked with `LockWorkStation`.
 
-Screenshots are only kept in memory and never written to disk.
+Screenshots and camera frames are only kept in memory and never written to disk.
 
 ## Usage
 
@@ -64,13 +65,26 @@ Tweak these at the top of `fake-desktop.ps1`:
 | `$GRACE`   | `2`                    | Seconds after launch during which nothing triggers.                         |
 | `$HOLD_MS` | `6000`                 | How long (ms) the gotcha screen stays up before the PC locks.               |
 | `$IMAGE`   | `laughinggif2.gif`     | Image shown when triggered (png/jpg/gif, GIFs animate). If missing, only the text is shown. |
+| `$CAMERA`  | `$false`               | Set to `$true` to show the webcam feed next to the GIF. See [Camera mode](#camera-mode). |
 
 Mouse movement has to exceed 8 pixels before it counts, so a slightly bumped desk won't set it off.
+
+### Camera mode
+
+With `$CAMERA = $true`, whoever gets caught also sees their own face, live and mirrored, right next to the laughing GIF.
+
+- The camera only turns on once someone gets caught, so the webcam light doesn't give the prank away while you're gone.
+- It takes a second or two for the camera to wake up. Bump `$HOLD_MS` up a bit if you want them to enjoy it longer.
+- The built-in front camera is preferred over virtual cameras (like a phone connected through Phone Link).
+- Frames are only shown on screen, nothing is recorded or saved.
+- Desktop apps need camera access: **Settings → Privacy & security → Camera → Let desktop apps access your camera**.
+- If there's no camera, it's busy, or access is blocked, the GIF simply takes the full width.
+- Uses the Windows Runtime camera API, so this needs **Windows PowerShell 5.1** (what `launch.vbs` uses), not PowerShell 7.
 
 ## Requirements
 
 - Windows 10 / 11
-- Windows PowerShell 5.1 (built in) or PowerShell 7 on Windows
+- Windows PowerShell 5.1 (built in) or PowerShell 7 on Windows (camera mode needs 5.1)
 
 ## Disclaimer
 
